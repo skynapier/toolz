@@ -1,0 +1,57 @@
+[package]
+name = "toolz"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+description = "Deterministic, offline code tools exposed over MCP"
+license = "MIT"
+
+[lib]
+name = "toolz"
+path = "src/lib.rs"
+
+[[bin]]
+name = "toolz"
+path = "src/main.rs"
+
+[dependencies]
+bytecount = "0.6.9"
+blake3 = "1.8.3"
+globset = "0.4.20"
+ignore = "0.4.25"
+oxc_allocator = "0.149.0"
+oxc_parser = "0.149.0"
+oxc_span = "0.149.0"
+regex = "1.12.3"
+rmcp = { version = "3.3.0", features = ["server", "transport-io", "schemars"] }
+rusqlite = { version = "0.40.0", features = ["bundled"] }
+schemars = "1.2.2"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+thiserror = "2.0.18"
+tokio = { version = "1.53.0", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "time"] }
+toml = "0.9.8"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
+tree-sitter = "0.25.8"
+tree-sitter-c-sharp = "0.23.5"
+tree-sitter-python = "0.25.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

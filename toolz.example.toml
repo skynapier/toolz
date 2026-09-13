@@ -1,0 +1,18 @@
+[run_capture]
+allow = [
+  ["cargo", "test"],
+  ["cargo", "check"],
+  ["cargo", "clippy"],
+  ["cargo", "fmt"],
+  ["cargo", "build"],
+  ["dotnet", "test"],
+  ["dotnet", "build"],
+  ["npm", "test"],
+  ["pnpm", "test"],
+  ["yarn", "test"],
+  ["go", "test"],
+  ["go", "build"],
+  ["pytest"],
+  ["ruff", "check"],
+  ["ruff", "format"],
+]
