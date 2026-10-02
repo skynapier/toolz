@@ -131,9 +131,9 @@ fn cache_directory() -> Option<PathBuf> {
     }
     #[cfg(target_os = "macos")]
     {
-        return std::env::var_os("HOME")
+        std::env::var_os("HOME")
             .map(PathBuf::from)
-            .map(|path| path.join("Library").join("Caches").join("toolz"));
+            .map(|path| path.join("Library").join("Caches").join("toolz"))
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {

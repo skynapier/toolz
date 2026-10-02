@@ -12,6 +12,8 @@ const MAX_MATCHES: usize = 1_000;
 const MAX_PREVIEW_CHARS: usize = 500;
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct RepoSearchRequest {
     /// Absolute path and security boundary.
     pub repo_root: String,
@@ -23,10 +25,17 @@ pub struct RepoSearchRequest {
     pub regex: bool,
     #[serde(default)]
     pub ignore_case: bool,
-    /// Gitignore-style glob, such as `src/**/*.rs`.
+    /// Globset glob supporting brace alternatives, for example `{src,tests}/**/*.rs`.
+    #[serde(alias = "path_glob")]
     pub include: Option<String>,
     #[serde(default)]
     pub include_hidden: bool,
+    /// Also search files excluded by .gitignore, .ignore, and git exclude files.
+    #[serde(default)]
+    pub include_ignored: bool,
+    /// Return one compact text row per matching line. Defaults to false.
+    #[serde(default)]
+    pub compact: bool,
     /// Hard limit: 1000.
     #[serde(default = "default_max_matches")]
     pub max_matches: usize,
@@ -73,7 +82,11 @@ pub(crate) fn execute(request: &RepoSearchRequest) -> Result<RepoSearchResult, T
 
     for entry in WalkBuilder::new(&root)
         .hidden(!request.include_hidden)
-        .git_ignore(true)
+        .git_ignore(!request.include_ignored)
+        .git_exclude(!request.include_ignored)
+        .ignore(!request.include_ignored)
+        .require_git(false)
+        .sort_by_file_path(std::path::Path::cmp)
         .build()
     {
         let Ok(entry) = entry else { continue };
@@ -111,6 +124,14 @@ pub(crate) fn execute(request: &RepoSearchRequest) -> Result<RepoSearchResult, T
                 .into_iter()
                 .flat_map(|matcher| matcher.find_iter(&line))
             {
+                if request.compact
+                    && results.last().is_some_and(|previous: &SearchMatch| {
+                        previous.path == relative.to_string_lossy().replace('\\', "/")
+                            && previous.line == Some(index + 1)
+                    })
+                {
+                    continue;
+                }
                 if results.len() == request.max_matches {
                     truncated = true;
                     break;
@@ -212,10 +233,62 @@ mod tests {
             ignore_case: false,
             include: Some("**/*.rs".to_owned()),
             include_hidden: false,
+            include_ignored: false,
+            compact: false,
             max_matches: 1,
         })
         .expect("search");
         assert_eq!(result.matches.len(), 1);
         assert!(result.truncated);
+    }
+
+    #[test]
+    fn searches_ignored_files_only_when_asked() {
+        let root = tempdir().expect("test directory");
+        fs::write(root.path().join(".gitignore"), "todo/\n").expect("gitignore fixture");
+        fs::create_dir_all(root.path().join("todo")).expect("todo directory");
+        fs::write(root.path().join("todo/plan.md"), "needle\n").expect("todo fixture");
+
+        let base_request = |include_ignored: bool| RepoSearchRequest {
+            repo_root: root.path().display().to_string(),
+            mode: super::SearchMode::Content,
+            query: Some("needle".to_owned()),
+            regex: false,
+            ignore_case: false,
+            include: None,
+            include_hidden: false,
+            include_ignored,
+            compact: false,
+            max_matches: 10,
+        };
+
+        let result = execute(&base_request(false)).expect("search without ignored");
+        assert_eq!(result.matches.len(), 0);
+
+        let result = execute(&base_request(true)).expect("search with ignored");
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].path, "todo/plan.md");
+    }
+
+    #[test]
+    fn aliases_globs_compact_rows_and_unknown_fields() {
+        let root = tempdir().expect("test directory");
+        for dir in ["src", "tests", "docs"] {
+            fs::create_dir(root.path().join(dir)).expect("directory");
+            fs::write(root.path().join(dir).join("sample.rs"), "needle needle\n").expect("fixture");
+        }
+        let args = serde_json::json!({"repo_root": root.path().display().to_string(), "query": "needle", "path_glob": "{src,tests}/**/*.rs", "compact": true});
+        let request: RepoSearchRequest = serde_json::from_value(args.clone()).expect("request");
+        let result = execute(&request).expect("search");
+        assert_eq!(result.matches.len(), 2);
+        assert_eq!(result.matches[0].path, "src/sample.rs");
+        assert_eq!(result.matches[1].path, "tests/sample.rs");
+        let mut legacy = args.clone();
+        legacy["compact"] = serde_json::json!(false);
+        let request: RepoSearchRequest = serde_json::from_value(legacy).expect("request");
+        assert_eq!(execute(&request).expect("legacy search").matches.len(), 4);
+        let mut unknown = args;
+        unknown["path_globb"] = serde_json::json!("docs/**");
+        assert!(serde_json::from_value::<RepoSearchRequest>(unknown).is_err());
     }
 }

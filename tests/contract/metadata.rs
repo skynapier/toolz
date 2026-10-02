@@ -13,10 +13,10 @@ fn public_tool_set_and_metadata_stay_bounded() {
             "dependency_trace",
             "diff_inspect",
             "failure_extract",
+            "git_status",
             "repo_read",
             "repo_search",
             "run_capture",
-            "secret_scan",
         ]
     );
 
@@ -70,7 +70,7 @@ fn public_tool_set_and_metadata_stay_bounded() {
     assert!(list.len() <= 64 * 1024, "list_tools payload is too large");
     assert_eq!(
         blake3::hash(&list).to_hex().as_str(),
-        "e8e82df2a170c0487d4555acc6c8c0082a2a863e37082f19c5fa2a7b9dd2ac4e",
+        "59707cd818326309a35c876618958f6f3f9a73160474cf90ff229813bb904f12",
         "public MCP contract changed; review it and update this snapshot deliberately"
     );
 }

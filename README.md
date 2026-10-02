@@ -1,7 +1,7 @@
 # toolz
 
 Toolz is a deterministic, offline Rust MCP server for bounded code search, reading,
-dependency tracing, diff inspection, command capture, failure extraction, and secret scanning.
+dependency tracing, diff inspection, Git status, command capture, and failure extraction.
 
 The implementation is being migrated from the read-only behavior of
 `../local-coder-mcp`. Toolz does not call models, embedding services, or network APIs.
@@ -14,9 +14,37 @@ The implementation is being migrated from the read-only behavior of
 - `diff_inspect`
 - `run_capture`
 - `failure_extract`
-- `secret_scan`
+- `git_status`
 
 `local_index` is an internal implementation detail and is not exposed through MCP.
+
+## Bounded reads and compact output
+
+`repo_read` accepts `start_line` plus either inclusive `end_line` or `max_lines`.
+For lines 150–180 use `start_line: 150, end_line: 180` (31 lines), or
+`start_line: 150, max_lines: 31`. Supplying both bounds fails. With neither,
+the default is 400 lines. Unknown request fields fail instead of being ignored.
+
+`repo_search` uses `include` for Globset globs, including `{src,tests}/**/*.rs`;
+`path_glob` is accepted as a compatibility alias. Search traversal is sorted before
+limits are applied. `include_ignored` explicitly opts into ignored files.
+
+Both tools accept `compact: true`. Reads return a range/truncation header followed
+by raw source text; searches return `path:line:column: preview` rows, at most one
+per matching source line, followed by scan/truncation information. Compact mode
+returns only TextContent, avoiding a duplicate structured payload. Default mode
+keeps the JSON result and structuredContent; search keeps occurrence records.
+These two tools omit outputSchema because their response mode is selectable.
+Reconnect the MCP host after replacing the release binary to load the new schema.
+
+## Diff and Git status scope
+
+`diff_inspect` accepts `paths`, repository-relative paths matched literally, to limit
+the diff, and `ignore_whitespace: true` to drop whitespace-only changes like `git diff -w`.
+`git_status` runs `git status --porcelain=v2 --branch` and `git log` with optional locks
+disabled, so it never rewrites the index. It returns branch, HEAD, upstream, ahead/behind,
+changed paths sorted by path (`max_changes`, default 200), and the last `log` commits
+(default 5).
 
 ## Build and run
 

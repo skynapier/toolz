@@ -10,10 +10,10 @@ use crate::tools::{
     dependency_trace::{self, DependencyTraceRequest, DependencyTraceResult},
     diff_inspect::{self, DiffInspectRequest, DiffInspectResult},
     failure_extract::{self, FailureExtractRequest, FailureExtractResult},
-    repo_read::{self, RepoReadRequest, RepoReadResult},
-    repo_search::{self, RepoSearchRequest, RepoSearchResult},
+    git_status::{self, GitStatusRequest, GitStatusResult},
+    repo_read::{self, RepoReadRequest},
+    repo_search::{self, RepoSearchRequest},
     run_capture::{self, RunCaptureRequest, RunCaptureResult},
-    secret_scan::{self, SecretScanRequest, SecretScanResult},
 };
 
 #[derive(Debug, Clone)]
@@ -84,6 +84,20 @@ fn strip_formats(value: &mut Value) {
     }
 }
 
+fn render_result<T: serde::Serialize>(
+    value: &T,
+    text: Option<String>,
+) -> Result<rmcp::model::CallToolResult, ErrorData> {
+    if let Some(text) = text {
+        return Ok(rmcp::model::CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(text),
+        ]));
+    }
+    let data = serde_json::to_value(value)
+        .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
+    Ok(rmcp::model::CallToolResult::structured(data))
+}
+
 impl Default for ToolzServer {
     fn default() -> Self {
         Self::new()
@@ -94,7 +108,7 @@ impl Default for ToolzServer {
 impl ToolzServer {
     #[tool(
         name = "repo_search",
-        description = "Search repository text or list files while honoring Git ignore rules. Content mode accepts literal or Rust-regex queries; files mode supports glob-only discovery. Results are stable and bounded.",
+        description = "Search repository text or list files honoring ignore rules. Use include for Globset globs (brace alternatives supported). compact=true returns one path:line:column:preview text row per source line; default JSON retains occurrence records. Results are stable and bounded.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -105,13 +119,30 @@ impl ToolzServer {
     async fn repo_search(
         &self,
         Parameters(request): Parameters<RepoSearchRequest>,
-    ) -> Result<Json<RepoSearchResult>, ErrorData> {
-        repo_search::execute(&request).map(Json).map_err(Into::into)
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let result = repo_search::execute(&request).map_err(ErrorData::from)?;
+        let mut rows = result
+            .matches
+            .iter()
+            .map(
+                |entry| match (entry.line, entry.column, entry.preview.as_deref()) {
+                    (Some(line), Some(column), Some(preview)) => {
+                        format!("{}:{line}:{column}: {preview}", entry.path)
+                    }
+                    _ => entry.path.clone(),
+                },
+            )
+            .collect::<Vec<_>>();
+        rows.push(format!(
+            "files_scanned={} truncated={}",
+            result.files_scanned, result.truncated
+        ));
+        render_result(&result, request.compact.then(|| rows.join("\n")))
     }
 
     #[tool(
         name = "repo_read",
-        description = "Read a bounded line range from one repository file. Paths are canonicalized and must remain below repo_root. Use this instead of a shell when exact source text is needed. Output reports truncation.",
+        description = "Read one repository file. Use start_line plus inclusive end_line OR max_lines (default 400), never both. Unknown parameters fail. compact=true returns raw source with a range header; default returns JSON. Paths must remain below repo_root. Output reports truncation.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -122,11 +153,19 @@ impl ToolzServer {
     async fn repo_read(
         &self,
         Parameters(request): Parameters<RepoReadRequest>,
-    ) -> Result<Json<RepoReadResult>, ErrorData> {
-        repo_read::execute(&request)
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let result = repo_read::execute(&request)
             .await
-            .map(Json)
-            .map_err(Into::into)
+            .map_err(ErrorData::from)?;
+        let text = format!(
+            "{}:{}-{} truncated={}\n{}",
+            result.path,
+            result.start_line,
+            result.end_line.unwrap_or(result.start_line),
+            result.truncated,
+            result.content
+        );
+        render_result(&result, request.compact.then_some(text))
     }
 
     #[tool(
@@ -207,8 +246,8 @@ impl ToolzServer {
     }
 
     #[tool(
-        name = "secret_scan",
-        description = "Scan only added Git diff lines for deterministic secret patterns. Findings contain rule, path, line, and a redacted preview; complete suspected secrets are never returned. Supports working-tree or staged changes.",
+        name = "git_status",
+        description = "Report a Git repository's branch, HEAD, upstream, ahead/behind counts, changed paths sorted by path, and recent commit subjects. Read-only: Git runs directly with optional locks disabled, without a shell or model.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -216,11 +255,11 @@ impl ToolzServer {
             open_world_hint = false
         )
     )]
-    async fn secret_scan(
+    async fn git_status(
         &self,
-        Parameters(request): Parameters<SecretScanRequest>,
-    ) -> Result<Json<SecretScanResult>, ErrorData> {
-        secret_scan::execute(&request).map(Json).map_err(Into::into)
+        Parameters(request): Parameters<GitStatusRequest>,
+    ) -> Result<Json<GitStatusResult>, ErrorData> {
+        git_status::execute(&request).map(Json).map_err(Into::into)
     }
 }
 
@@ -228,6 +267,23 @@ impl ToolzServer {
     router = self.tool_router,
     name = "toolz",
     version = "0.1.0",
-    instructions = "Toolz provides deterministic, offline repository operations. Prefer its bounded structured tools for search, reading, dependency evidence, diff inspection, command capture, failure extraction, and secret scanning. It never invokes a model, embedding service, shell, or network API. Supply an explicit repository root. Treat truncation as a request to narrow the query. Tool errors include stable toolz_code data."
+    instructions = "Toolz provides deterministic, offline repository operations. Prefer its bounded structured tools for search, reading, dependency evidence, diff inspection, Git status, command capture, and failure extraction. It never invokes a model, embedding service, shell, or network API. Supply an explicit repository root. Treat truncation as a request to narrow the query. Tool errors include stable toolz_code data."
 )]
 impl ServerHandler for ToolzServer {}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod output_tests {
+    use super::render_result;
+    #[test]
+    fn compact_is_raw_text_without_duplicate_payload() {
+        let value = serde_json::json!({"content": "a\nb"});
+        let result = render_result(&value, Some("a\nb".to_owned())).expect("result");
+        assert!(result.structured_content.is_none());
+        assert_eq!(result.content.len(), 1);
+        let block = serde_json::to_value(&result.content[0]).expect("block");
+        assert_eq!(block["text"], "a\nb");
+        let result = render_result(&value, None).expect("json result");
+        assert_eq!(result.structured_content, Some(value));
+    }
+}

@@ -1,4 +1,7 @@
-use std::{path::Path, process::Command};
+use std::{
+    path::{Component, Path},
+    process::Command,
+};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -6,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::ToolError;
 
 const MAX_DIFF_BYTES: usize = 256 * 1024;
+const MAX_PATHS: usize = 100;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DiffInspectRequest {
@@ -22,6 +26,12 @@ pub struct DiffInspectRequest {
     /// Maximum ranked hotspots. Defaults to 10; hard limit is 100.
     #[serde(default = "default_max_files")]
     pub max_files: usize,
+    /// Repository-relative paths that limit the diff; matched literally. Hard limit is 100.
+    #[serde(default)]
+    pub paths: Vec<String>,
+    /// Ignore whitespace changes, like `git diff -w`.
+    #[serde(default)]
+    pub ignore_whitespace: bool,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -67,6 +77,7 @@ pub(crate) fn execute(request: &DiffInspectRequest) -> Result<DiffInspectResult,
             "max_files must be between 1 and 100".to_owned(),
         ));
     }
+    validate_paths(&request.paths)?;
     let root = canonical_git_root(&request.repo_root)?;
     let numstat = run_git(&root, request, "--numstat")?;
     let mut files = parse_numstat(&numstat);
@@ -125,7 +136,7 @@ pub(crate) fn execute(request: &DiffInspectRequest) -> Result<DiffInspectResult,
     })
 }
 
-fn canonical_git_root(value: &str) -> Result<std::path::PathBuf, ToolError> {
+pub(crate) fn canonical_git_root(value: &str) -> Result<std::path::PathBuf, ToolError> {
     let root = Path::new(value).canonicalize().map_err(ToolError::Io)?;
     if !root.join(".git").exists() {
         return Err(ToolError::InvalidInput(
@@ -135,12 +146,36 @@ fn canonical_git_root(value: &str) -> Result<std::path::PathBuf, ToolError> {
     Ok(root)
 }
 
+fn validate_paths(paths: &[String]) -> Result<(), ToolError> {
+    if paths.len() > MAX_PATHS {
+        return Err(ToolError::LimitExceeded(format!(
+            "paths must list at most {MAX_PATHS} entries"
+        )));
+    }
+    let invalid = paths.iter().find(|path| {
+        path.is_empty()
+            || path.starts_with('-')
+            || path.starts_with(':')
+            || Path::new(path).is_absolute()
+            || Path::new(path)
+                .components()
+                .any(|component| matches!(component, Component::ParentDir))
+    });
+    match invalid {
+        Some(path) => Err(ToolError::InvalidInput(format!("invalid path: {path}"))),
+        None => Ok(()),
+    }
+}
+
 fn git_args(request: &DiffInspectRequest, format: &str) -> Vec<String> {
     let mut args = vec![
         "diff".to_owned(),
         format.to_owned(),
         "--no-ext-diff".to_owned(),
     ];
+    if request.ignore_whitespace {
+        args.push("-w".to_owned());
+    }
     if request.staged {
         args.push("--cached".to_owned());
     }
@@ -148,6 +183,7 @@ fn git_args(request: &DiffInspectRequest, format: &str) -> Vec<String> {
         args.push(revision.clone());
     }
     args.push("--".to_owned());
+    args.extend(request.paths.iter().cloned());
     args
 }
 
@@ -162,6 +198,7 @@ fn run_git_bytes(
 ) -> Result<Vec<u8>, ToolError> {
     let output = Command::new("git")
         .args(git_args(request, format))
+        .env("GIT_LITERAL_PATHSPECS", "1")
         .current_dir(root)
         .output()?;
     if !output.status.success() {
@@ -250,8 +287,63 @@ const fn default_max_files() -> usize {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
-    use super::parse_numstat;
+    use std::{fs, process::Command};
+
+    use super::{DiffInspectRequest, DiffInspectResult, execute, parse_numstat, validate_paths};
+
+    #[test]
+    fn rejects_paths_that_escape_or_look_like_options() {
+        for path in ["../x", "/etc/passwd", "-p", ":(glob)*", ""] {
+            assert!(validate_paths(&[path.to_owned()]).is_err(), "{path}");
+        }
+        assert!(validate_paths(&["src/main.rs".to_owned()]).is_ok());
+    }
+
+    #[test]
+    fn limits_diff_to_paths_and_ignores_whitespace() {
+        let root = tempfile::tempdir().expect("test directory");
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(root.path())
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        fs::write(root.path().join("a.txt"), "a\n").expect("fixture");
+        fs::write(root.path().join("b.txt"), "b\n").expect("fixture");
+        git(&["add", "."]);
+        git(&["commit", "-qm", "initial"]);
+        fs::write(root.path().join("a.txt"), format!("a{}\n", " ".repeat(2))).expect("fixture");
+        fs::write(root.path().join("b.txt"), "c\n").expect("fixture");
+        let request = |paths: Vec<String>, ignore_whitespace: bool| DiffInspectRequest {
+            repo_root: root.path().display().to_string(),
+            staged: false,
+            revision: None,
+            include_patch: false,
+            max_files: 10,
+            paths,
+            ignore_whitespace,
+        };
+        let changed = |result: DiffInspectResult| -> Vec<String> {
+            result
+                .files
+                .into_iter()
+                .filter(|file| file.added + file.deleted > 0)
+                .map(|file| file.path)
+                .collect()
+        };
+        let all = execute(&request(Vec::new(), false)).expect("diff");
+        assert_eq!(changed(all), ["a.txt", "b.txt"]);
+        let only_b = execute(&request(vec!["b.txt".to_owned()], false)).expect("diff");
+        assert_eq!(changed(only_b), ["b.txt"]);
+        let no_whitespace = execute(&request(Vec::new(), true)).expect("diff");
+        assert_eq!(changed(no_whitespace), ["b.txt"]);
+    }
 
     #[test]
     fn parses_text_and_binary_numstat() {
