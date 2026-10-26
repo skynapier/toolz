@@ -103,6 +103,13 @@ Back up host configuration before replacing another server. Rollback is limited 
 removing `toolz` from each host and restoring that backup; Toolz does not alter the old
 server repository.
 
+## Optional host hooks
+
+Toolz Rust MCP works without hooks. Optional host hooks provide an additional
+convenience guard for common shell file reads. See [docs/hooks.md](docs/hooks.md)
+for the standalone Python hook, host configuration examples, update instructions,
+and tests. Personal codez and cleanup policies remain outside this integration.
+
 ## Contract policy
 
 Rust request/result structs are the source of truth for MCP schemas. Server startup
